@@ -31,9 +31,17 @@ async def upload_goldens(file: UploadFile = File(...)):
 # Test metrics endpoint
 @app.get("/api/metrics")
 async def get_metrics():
-    # For now, return dummy data
+    # Binary metrics: pass/fail counts
     return {
         "total_evaluations": 0,
-        "average_accuracy": 0.0,
-        "average_tone": 0.0
+        "accuracy": {
+            "correct": 0,
+            "incorrect": 0,
+            "pass_rate": 0.0
+        },
+        "tone": {
+            "empathetic": 0, 
+            "not_empathetic": 0,
+            "pass_rate": 0.0
+        }
     }
