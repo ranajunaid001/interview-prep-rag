@@ -79,8 +79,10 @@ async def chat(msg: ChatMessage):
         context_chunks = []
         sources = []
         for match in results['matches']:
-            context_chunks.append(match['metadata']['text'])
-            sources.append(match['metadata']['source'])
+            if 'text' in match['metadata']:
+                context_chunks.append(match['metadata']['text'])
+            if 'source' in match['metadata']:
+                sources.append(match['metadata']['source'])
         
         if not context_chunks:
             return {"response": "I don't have any relevant information about that in my knowledge base. Please upload relevant documents first."}
