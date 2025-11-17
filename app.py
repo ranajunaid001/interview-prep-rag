@@ -102,10 +102,16 @@ Instructions:
 
 Answer:"""
         
-        # Get response from Gemini
-        response = gemini_model.generate_content(prompt)
+        # Get response from OpenAI
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an interview prep assistant."},
+                {"role": "user", "content": prompt}
+            ]
+        )
         
-        return {"response": response.text, "sources": list(set(sources))}
+        return {"response": response.choices[0].message.content, "sources": list(set(sources))}
         
     except Exception as e:
         return {"response": f"Error: {str(e)}"}
