@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+openai
+pinecone-client
+anthropic
+python-multipart
