@@ -31,6 +31,26 @@ index = pc.Index(index_name)
 class ChatMessage(BaseModel):
     message: str
 
+# Helper functions
+def chunk_text(text, chunk_size=500, overlap=50):
+    """Split text into overlapping chunks"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start = end - overlap
+    return chunks
+
+def get_embedding(text):
+    """Get OpenAI embedding for text"""
+    response = openai_client.embeddings.create(
+        model="text-embedding-ada-002",
+        input=text
+    )
+    return response.data[0].embedding
+
 # Serve the HTML page
 @app.get("/")
 def home():
@@ -42,6 +62,43 @@ def home():
 @app.post("/api/chat")
 async def chat(msg: ChatMessage):
     return {"response": f"You said: {msg.message}"}
+
+# Document upload endpoint
+@app.post("/api/upload-document")
+async def upload_document(file: UploadFile = File(...)):
+    try:
+        # Read file content
+        content = await file.read()
+        text = content.decode('utf-8')
+        
+        # Chunk the text
+        chunks = chunk_text(text)
+        
+        # Create embeddings and store in Pinecone
+        vectors = []
+        for i, chunk in enumerate(chunks):
+            embedding = get_embedding(chunk)
+            vectors.append({
+                "id": f"{file.filename}_{i}",
+                "values": embedding,
+                "metadata": {
+                    "text": chunk,
+                    "source": file.filename,
+                    "chunk_index": i
+                }
+            })
+        
+        # Upsert to Pinecone
+        index.upsert(vectors=vectors)
+        
+        return {
+            "success": True,
+            "filename": file.filename,
+            "chunks_created": len(chunks),
+            "message": f"Successfully indexed {len(chunks)} chunks from {file.filename}"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 # Test upload endpoint
 @app.post("/api/upload-goldens")
