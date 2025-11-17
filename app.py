@@ -7,6 +7,9 @@ import pandas as pd
 from pinecone import Pinecone
 from openai import OpenAI
 import google.generativeai as genai
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import datetime
 
 app = FastAPI()
 
@@ -23,10 +26,15 @@ index_name = os.environ.get("PINECONE_INDEX_NAME", "interview-prep")
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
-        dimension=1024,  # Match Pinecone's requirement
+        dimension=1024,
         metric='cosine'
     )
 index = pc.Index(index_name)
+
+# Database connection
+def get_db():
+    conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
+    return conn
 
 # Model for chat messages
 class ChatMessage(BaseModel):
@@ -49,7 +57,7 @@ def get_embedding(text):
     response = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=text,
-        dimensions=1024  # Specify 1024 dimensions
+        dimensions=1024
     )
     return response.data[0].embedding
 
@@ -67,12 +75,11 @@ async def chat(msg: ChatMessage):
         # Get embedding for the question
         query_embedding = get_embedding(msg.message)
         
-        # Search Pinecone for relevant DOCUMENT chunks only
+        # Search Pinecone for relevant chunks
         results = index.query(
             vector=query_embedding,
             top_k=3,
-            include_metadata=True,
-
+            include_metadata=True
         )
         
         # Extract context from results
@@ -87,7 +94,7 @@ async def chat(msg: ChatMessage):
         if not context_chunks:
             return {"response": "I don't have any relevant information about that in my knowledge base. Please upload relevant documents first."}
         
-        # Build prompt for Gemini
+        # Build prompt for OpenAI
         context = "\n\n".join(context_chunks)
         prompt = f"""You are an interview prep assistant. Answer the user's question based ONLY on the provided context.
         
@@ -118,7 +125,7 @@ Answer:"""
     except Exception as e:
         return {"response": f"Error: {str(e)}"}
 
-# Document upload endpoint
+# Document upload endpoint (unchanged - still uses Pinecone)
 @app.post("/api/upload-document")
 async def upload_document(file: UploadFile = File(...)):
     try:
@@ -137,7 +144,6 @@ async def upload_document(file: UploadFile = File(...)):
                 "id": f"doc_{file.filename}_{i}",
                 "values": embedding,
                 "metadata": {
-                    "type": "document",
                     "text": chunk,
                     "source": file.filename,
                     "chunk_index": i
@@ -156,7 +162,7 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# Upload goldens endpoint
+# Upload goldens endpoint - NOW USES POSTGRESQL
 @app.post("/api/upload-goldens")
 async def upload_goldens(file: UploadFile = File(...)):
     try:
@@ -172,60 +178,70 @@ async def upload_goldens(file: UploadFile = File(...)):
         # Convert to list of dictionaries
         goldens = df.to_dict('records')
         
-        # Store each golden in Pinecone
-        vectors = []
-        for i, golden in enumerate(goldens):
-            # Create unique ID based on question
-            golden_id = f"golden_{hash(golden['question']) % 1000000}"
-            
-            # Get embedding for the question
-            embedding = get_embedding(golden['question'])
-            
-            vectors.append({
-                "id": golden_id,
-                "values": embedding,
-                "metadata": {
-                    "type": "golden",
-                    "question": golden['question'],
-                    "ideal_answer": golden['ideal_answer'],
-                    "intent": golden['intent'],
-                    "expected_document": golden['expected_document']
-                }
-            })
+        # Insert into PostgreSQL
+        conn = get_db()
+        cur = conn.cursor()
         
-        # Upsert to Pinecone
-        index.upsert(vectors=vectors)
+        inserted = 0
+        updated = 0
+        
+        for golden in goldens:
+            try:
+                # Try to insert, if exists then update
+                cur.execute("""
+                    INSERT INTO goldens (question, ideal_answer, intent, expected_document, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (question) 
+                    DO UPDATE SET 
+                        ideal_answer = EXCLUDED.ideal_answer,
+                        intent = EXCLUDED.intent,
+                        expected_document = EXCLUDED.expected_document
+                    RETURNING (xmax = 0) AS inserted
+                """, (
+                    golden['question'],
+                    golden['ideal_answer'],
+                    golden['intent'],
+                    golden['expected_document'],
+                    datetime.now()
+                ))
+                
+                if cur.fetchone()[0]:
+                    inserted += 1
+                else:
+                    updated += 1
+                    
+            except Exception as e:
+                conn.rollback()
+                return {"success": False, "error": f"Database error: {str(e)}"}
+        
+        conn.commit()
+        conn.close()
         
         return {
             "success": True,
-            "message": f"Uploaded {len(goldens)} golden examples",
-            "examples": len(goldens),
-            "sample": goldens[0] if goldens else None
+            "message": f"Processed {len(goldens)} golden examples",
+            "inserted": inserted,
+            "updated": updated
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# Get golden examples from Pinecone
+# Get golden examples from PostgreSQL
 @app.get("/api/get-goldens")
 async def get_goldens():
     try:
-        # Query all goldens (using a dummy vector)
-        dummy_embedding = [0.0] * 1024
-        results = index.query(
-            vector=dummy_embedding,
-            top_k=10000,  # Get all goldens
-            include_metadata=True,
-            filter={"type": "golden"}
-        )
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        goldens = []
-        for match in results['matches']:
-            goldens.append({
-                "question": match['metadata']['question'],
-                "ideal_answer": match['metadata']['ideal_answer'],
-                "intent": match['metadata']['intent'],
-                "expected_document": match['metadata']['expected_document']
-            })
+        cur.execute("SELECT * FROM goldens ORDER BY id")
+        goldens = cur.fetchall()
+        
+        conn.close()
+        
+        # Convert date objects to strings
+        for golden in goldens:
+            if golden.get('created_at'):
+                golden['created_at'] = str(golden['created_at'])
         
         return {
             "total": len(goldens),
@@ -238,9 +254,12 @@ async def get_goldens():
 @app.post("/api/run-evaluation")
 async def run_evaluation():
     try:
-        # Get all goldens
-        goldens_response = await get_goldens()
-        goldens = goldens_response.get('goldens', [])
+        # Get all goldens from PostgreSQL
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM goldens")
+        goldens = cur.fetchall()
         
         if not goldens:
             return {"error": "No golden examples found"}
@@ -315,6 +334,24 @@ Respond ONLY with this JSON format:
         tone_empathetic = sum(1 for r in evaluation_results if r['tone'] == 'empathetic')
         total = len(evaluation_results)
         
+        accuracy_rate = accuracy_correct / total if total > 0 else 0
+        tone_rate = tone_empathetic / total if total > 0 else 0
+        
+        # Store evaluation run in database
+        cur.execute("""
+            INSERT INTO evaluation_runs (run_date, accuracy_rate, tone_rate, total_evaluated, details)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (
+            datetime.now(),
+            accuracy_rate,
+            tone_rate,
+            total,
+            json.dumps(evaluation_results)
+        ))
+        
+        conn.commit()
+        conn.close()
+        
         return {
             "success": True,
             "total_evaluated": total,
@@ -322,12 +359,12 @@ Respond ONLY with this JSON format:
                 "accuracy": {
                     "correct": accuracy_correct,
                     "incorrect": total - accuracy_correct,
-                    "pass_rate": accuracy_correct / total if total > 0 else 0
+                    "pass_rate": accuracy_rate
                 },
                 "tone": {
                     "empathetic": tone_empathetic,
                     "not_empathetic": total - tone_empathetic,
-                    "pass_rate": tone_empathetic / total if total > 0 else 0
+                    "pass_rate": tone_rate
                 }
             },
             "detailed_results": evaluation_results
@@ -335,36 +372,60 @@ Respond ONLY with this JSON format:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# Metrics endpoint - now gets real data
+# Get metrics from database
 @app.get("/api/metrics")
 async def get_metrics():
-    # For now, return last evaluation results
-    # In production, store these in database
-    return {
-        "message": "Run /api/run-evaluation first to generate metrics"
-    }
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get latest evaluation run
+        cur.execute("""
+            SELECT * FROM evaluation_runs 
+            ORDER BY run_date DESC 
+            LIMIT 1
+        """)
+        
+        latest_run = cur.fetchone()
+        conn.close()
+        
+        if not latest_run:
+            return {"message": "No evaluation runs found. Run /api/run-evaluation first."}
+        
+        # Convert date to string
+        latest_run['run_date'] = str(latest_run['run_date'])
+        
+        return {
+            "latest_run": latest_run,
+            "metrics": {
+                "accuracy_rate": latest_run['accuracy_rate'],
+                "tone_rate": latest_run['tone_rate'],
+                "total_evaluated": latest_run['total_evaluated']
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
-# Health check for connections
+# Health check
 @app.get("/api/health")
 async def health_check():
     try:
         stats = index.describe_index_stats()
         
-        # Count goldens
-        dummy_embedding = [0.0] * 1024
-        golden_results = index.query(
-            vector=dummy_embedding,
-            top_k=1,
-            include_metadata=True,
-            filter={"type": "golden"}
-        )
-        golden_count = len(golden_results['matches'])
+        # Check PostgreSQL connection
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM goldens")
+        golden_count = cur.fetchone()[0]
+        conn.close()
         
         return {
             "status": "healthy",
             "pinecone_connected": True,
+            "postgres_connected": True,
             "total_vectors": stats.total_vector_count,
             "golden_examples": golden_count,
+            "openai_ready": True,
             "gemini_ready": True
         }
     except Exception as e:
@@ -374,3 +435,8 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+**Also update your requirements.txt to add:**
+```
+psycopg2-binary
