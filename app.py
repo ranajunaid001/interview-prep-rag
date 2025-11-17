@@ -59,7 +59,6 @@ def home():
         html_content = f.read()
     return HTMLResponse(content=html_content)
 
-# RAG chat endpoint
 @app.post("/api/chat")
 async def chat(msg: ChatMessage):
     try:
@@ -73,11 +72,10 @@ async def chat(msg: ChatMessage):
             include_metadata=True
         )
         
-        # Extract context from results
+        # Extract context from results - NO THRESHOLD
         context_chunks = []
         for match in results['matches']:
-            if match['score'] > 0.7:  # Relevance threshold
-                context_chunks.append(match['metadata']['text'])
+            context_chunks.append(match['metadata']['text'])
         
         if not context_chunks:
             return {"response": "I don't have any relevant information about that in my knowledge base. Please upload relevant documents first."}
