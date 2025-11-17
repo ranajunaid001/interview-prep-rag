@@ -22,7 +22,7 @@ index_name = os.environ.get("PINECONE_INDEX_NAME", "interview-prep")
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
-        dimension=1536,  # OpenAI embedding dimension
+        dimension=1024,  # Match Pinecone's requirement
         metric='cosine'
     )
 index = pc.Index(index_name)
@@ -46,8 +46,9 @@ def chunk_text(text, chunk_size=500, overlap=50):
 def get_embedding(text):
     """Get OpenAI embedding for text"""
     response = openai_client.embeddings.create(
-        model="text-embedding-ada-002",
-        input=text
+        model="text-embedding-3-small",
+        input=text,
+        dimensions=1024  # Specify 1024 dimensions
     )
     return response.data[0].embedding
 
@@ -58,10 +59,53 @@ def home():
         html_content = f.read()
     return HTMLResponse(content=html_content)
 
-# Test chat endpoint (keeping for now)
+# RAG chat endpoint
 @app.post("/api/chat")
 async def chat(msg: ChatMessage):
-    return {"response": f"You said: {msg.message}"}
+    try:
+        # Get embedding for the question
+        query_embedding = get_embedding(msg.message)
+        
+        # Search Pinecone for relevant chunks
+        results = index.query(
+            vector=query_embedding,
+            top_k=3,
+            include_metadata=True
+        )
+        
+        # Extract context from results
+        context_chunks = []
+        for match in results['matches']:
+            if match['score'] > 0.7:  # Relevance threshold
+                context_chunks.append(match['metadata']['text'])
+        
+        if not context_chunks:
+            return {"response": "I don't have any relevant information about that in my knowledge base. Please upload relevant documents first."}
+        
+        # Build prompt for Gemini
+        context = "\n\n".join(context_chunks)
+        prompt = f"""You are an interview prep assistant. Answer the user's question based ONLY on the provided context.
+        
+Context from documents:
+{context}
+
+User Question: {msg.message}
+
+Instructions:
+- Answer ONLY using information from the context above
+- If the answer isn't in the context, say "I don't have information about that in the provided documents"
+- Be concise and interview-focused
+- Use a supportive, coaching tone
+
+Answer:"""
+        
+        # Get response from Gemini
+        response = gemini_model.generate_content(prompt)
+        
+        return {"response": response.text}
+        
+    except Exception as e:
+        return {"response": f"Error: {str(e)}"}
 
 # Document upload endpoint
 @app.post("/api/upload-document")
@@ -133,8 +177,8 @@ async def health_check():
             "vectors_count": stats.total_vector_count,
             "gemini_ready": True
         }
-    except:
-        return {"status": "unhealthy", "pinecone_connected": False}
+    except Exception as e:
+        return {"status": "unhealthy", "pinecone_connected": False, "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
