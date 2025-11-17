@@ -10,9 +10,6 @@ import google.generativeai as genai
 
 app = FastAPI()
 
-# Global storage for goldens (temporary - use database in production)
-GOLDEN_EXAMPLES = []
-
 # Initialize clients
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -70,17 +67,20 @@ async def chat(msg: ChatMessage):
         # Get embedding for the question
         query_embedding = get_embedding(msg.message)
         
-        # Search Pinecone for relevant chunks
+        # Search Pinecone for relevant DOCUMENT chunks only
         results = index.query(
             vector=query_embedding,
             top_k=3,
-            include_metadata=True
+            include_metadata=True,
+            filter={"type": "document"}  # Only search documents, not goldens
         )
         
-        # Extract context from results - NO THRESHOLD
+        # Extract context from results
         context_chunks = []
+        sources = []
         for match in results['matches']:
             context_chunks.append(match['metadata']['text'])
+            sources.append(match['metadata']['source'])
         
         if not context_chunks:
             return {"response": "I don't have any relevant information about that in my knowledge base. Please upload relevant documents first."}
@@ -105,7 +105,7 @@ Answer:"""
         # Get response from Gemini
         response = gemini_model.generate_content(prompt)
         
-        return {"response": response.text}
+        return {"response": response.text, "sources": list(set(sources))}
         
     except Exception as e:
         return {"response": f"Error: {str(e)}"}
@@ -126,9 +126,10 @@ async def upload_document(file: UploadFile = File(...)):
         for i, chunk in enumerate(chunks):
             embedding = get_embedding(chunk)
             vectors.append({
-                "id": f"{file.filename}_{i}",
+                "id": f"doc_{file.filename}_{i}",
                 "values": embedding,
                 "metadata": {
+                    "type": "document",
                     "text": chunk,
                     "source": file.filename,
                     "chunk_index": i
@@ -163,9 +164,29 @@ async def upload_goldens(file: UploadFile = File(...)):
         # Convert to list of dictionaries
         goldens = df.to_dict('records')
         
-        # For now, store in a global variable (later use a database)
-        global GOLDEN_EXAMPLES
-        GOLDEN_EXAMPLES = goldens
+        # Store each golden in Pinecone
+        vectors = []
+        for i, golden in enumerate(goldens):
+            # Create unique ID based on question
+            golden_id = f"golden_{hash(golden['question']) % 1000000}"
+            
+            # Get embedding for the question
+            embedding = get_embedding(golden['question'])
+            
+            vectors.append({
+                "id": golden_id,
+                "values": embedding,
+                "metadata": {
+                    "type": "golden",
+                    "question": golden['question'],
+                    "ideal_answer": golden['ideal_answer'],
+                    "intent": golden['intent'],
+                    "expected_document": golden['expected_document']
+                }
+            })
+        
+        # Upsert to Pinecone
+        index.upsert(vectors=vectors)
         
         return {
             "success": True,
@@ -176,29 +197,143 @@ async def upload_goldens(file: UploadFile = File(...)):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# Get golden examples
+# Get golden examples from Pinecone
 @app.get("/api/get-goldens")
 async def get_goldens():
-    return {
-        "total": len(GOLDEN_EXAMPLES),
-        "goldens": GOLDEN_EXAMPLES
-    }
+    try:
+        # Query all goldens (using a dummy vector)
+        dummy_embedding = [0.0] * 1024
+        results = index.query(
+            vector=dummy_embedding,
+            top_k=10000,  # Get all goldens
+            include_metadata=True,
+            filter={"type": "golden"}
+        )
+        
+        goldens = []
+        for match in results['matches']:
+            goldens.append({
+                "question": match['metadata']['question'],
+                "ideal_answer": match['metadata']['ideal_answer'],
+                "intent": match['metadata']['intent'],
+                "expected_document": match['metadata']['expected_document']
+            })
+        
+        return {
+            "total": len(goldens),
+            "goldens": goldens
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
-# Metrics endpoint
+# Run evaluation endpoint
+@app.post("/api/run-evaluation")
+async def run_evaluation():
+    try:
+        # Get all goldens
+        goldens_response = await get_goldens()
+        goldens = goldens_response.get('goldens', [])
+        
+        if not goldens:
+            return {"error": "No golden examples found"}
+        
+        evaluation_results = []
+        
+        for golden in goldens:
+            # Get actual response from our system
+            chat_response = await chat(ChatMessage(message=golden['question']))
+            actual_answer = chat_response['response']
+            sources = chat_response.get('sources', [])
+            
+            # Evaluate using Gemini as judge
+            eval_prompt = f"""You are evaluating an interview prep assistant's response.
+
+Golden Question: {golden['question']}
+Expected Answer: {golden['ideal_answer']}
+Expected Document: {golden['expected_document']}
+Actual Answer: {actual_answer}
+Sources Used: {sources}
+
+Evaluate the response on two criteria:
+
+1. ACCURACY: Is the actual answer factually correct based on the expected answer?
+   - If it matches the key information: mark as "correct"
+   - If it's wrong or hallucinated: mark as "incorrect"
+
+2. TONE: Is the response empathetic and supportive like a good interview coach?
+   - If it's warm, encouraging, and helpful: mark as "empathetic"
+   - If it's cold, robotic, or harsh: mark as "not_empathetic"
+
+Respond ONLY with this JSON format:
+{{
+    "accuracy": "correct" or "incorrect",
+    "tone": "empathetic" or "not_empathetic",
+    "explanation": "Brief explanation of your evaluation"
+}}"""
+            
+            # Get evaluation from Gemini
+            eval_response = gemini_model.generate_content(eval_prompt)
+            
+            # Parse the evaluation
+            try:
+                eval_text = eval_response.text.strip()
+                # Remove any markdown formatting
+                if '```json' in eval_text:
+                    eval_text = eval_text.split('```json')[1].split('```')[0]
+                elif '```' in eval_text:
+                    eval_text = eval_text.split('```')[1].split('```')[0]
+                    
+                eval_result = json.loads(eval_text)
+            except:
+                eval_result = {
+                    "accuracy": "incorrect",
+                    "tone": "not_empathetic",
+                    "explanation": "Failed to parse evaluation"
+                }
+            
+            evaluation_results.append({
+                "question": golden['question'],
+                "intent": golden['intent'],
+                "expected_document": golden['expected_document'],
+                "actual_answer": actual_answer,
+                "sources": sources,
+                "accuracy": eval_result['accuracy'],
+                "tone": eval_result['tone'],
+                "explanation": eval_result.get('explanation', '')
+            })
+        
+        # Calculate metrics
+        accuracy_correct = sum(1 for r in evaluation_results if r['accuracy'] == 'correct')
+        tone_empathetic = sum(1 for r in evaluation_results if r['tone'] == 'empathetic')
+        total = len(evaluation_results)
+        
+        return {
+            "success": True,
+            "total_evaluated": total,
+            "metrics": {
+                "accuracy": {
+                    "correct": accuracy_correct,
+                    "incorrect": total - accuracy_correct,
+                    "pass_rate": accuracy_correct / total if total > 0 else 0
+                },
+                "tone": {
+                    "empathetic": tone_empathetic,
+                    "not_empathetic": total - tone_empathetic,
+                    "pass_rate": tone_empathetic / total if total > 0 else 0
+                }
+            },
+            "detailed_results": evaluation_results
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# Metrics endpoint - now gets real data
 @app.get("/api/metrics")
 async def get_metrics():
+    # For now, return last evaluation results
+    # In production, store these in database
     return {
-        "total_evaluations": 0,
-        "accuracy": {
-            "correct": 0,
-            "incorrect": 0,
-            "pass_rate": 0.0
-        },
-        "tone": {
-            "empathetic": 0, 
-            "not_empathetic": 0,
-            "pass_rate": 0.0
-        }
+        "message": "Run /api/run-evaluation first to generate metrics"
     }
 
 # Health check for connections
@@ -206,15 +341,26 @@ async def get_metrics():
 async def health_check():
     try:
         stats = index.describe_index_stats()
+        
+        # Count goldens
+        dummy_embedding = [0.0] * 1024
+        golden_results = index.query(
+            vector=dummy_embedding,
+            top_k=1,
+            include_metadata=True,
+            filter={"type": "golden"}
+        )
+        golden_count = len(golden_results['matches'])
+        
         return {
             "status": "healthy",
             "pinecone_connected": True,
-            "vectors_count": stats.total_vector_count,
-            "gemini_ready": True,
-            "golden_examples_loaded": len(GOLDEN_EXAMPLES)
+            "total_vectors": stats.total_vector_count,
+            "golden_examples": golden_count,
+            "gemini_ready": True
         }
     except Exception as e:
-        return {"status": "unhealthy", "pinecone_connected": False, "error": str(e)}
+        return {"status": "unhealthy", "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
