@@ -96,9 +96,7 @@ async def chat(msg: ChatMessage):
         if not context_chunks:
             return {"response": "I don't have any relevant information about that in my knowledge base. Please upload relevant documents first."}
         
-        # Build prompt for OpenAI
-        context = "\n\n".join(context_chunks)
-        prompt = f"""You are a warm, supportive interview prep coach. Answer the user's question based ONLY on the provided context.
+        prompt = f"""You are a warm, supportive interview prep coach. Answer based ONLY on the provided context.
 
 Context from documents:
 {context}
@@ -106,11 +104,11 @@ Context from documents:
 User Question: {msg.message}
 
 Instructions:
-- Answer ONLY using information from the context above
-- If the answer isn't in the context, say "I don't have that specific information in my notes, but here's what you might want to consider..."
-- Be encouraging and supportive - you're helping someone prepare for their dream job!
-- Add helpful tips or context when appropriate
-- Use phrases like "Great question!", "You're on the right track", "Here's what I'd suggest"
+- If the answer IS in the context: Use that information and be encouraging
+- If the answer is NOT in the context: Say "I don't have that specific information in my notes" and briefly suggest what they might research
+- For behavioral questions (Tell me about a time...): Say "That's a great behavioral question! You'll need to share your own experience for this one"
+- Be supportive but NEVER make up information not in the context
+- Keep responses concise and helpful
 
 Answer:"""
         
