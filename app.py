@@ -3,11 +3,15 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import json
 import os
+import pandas as pd
 from pinecone import Pinecone
 from openai import OpenAI
 import google.generativeai as genai
 
 app = FastAPI()
+
+# Global storage for goldens (temporary - use database in production)
+GOLDEN_EXAMPLES = []
 
 # Initialize clients
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
@@ -59,6 +63,7 @@ def home():
         html_content = f.read()
     return HTMLResponse(content=html_content)
 
+# RAG chat endpoint
 @app.post("/api/chat")
 async def chat(msg: ChatMessage):
     try:
@@ -142,12 +147,44 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# Test upload endpoint
+# Upload goldens endpoint
 @app.post("/api/upload-goldens")
 async def upload_goldens(file: UploadFile = File(...)):
-    return {"filename": file.filename, "size": len(await file.read())}
+    try:
+        # Read Excel file
+        content = await file.read()
+        df = pd.read_excel(content)
+        
+        # Validate columns
+        required_columns = ['question', 'ideal_answer', 'intent', 'expected_document']
+        if not all(col in df.columns for col in required_columns):
+            return {"success": False, "error": f"Excel must have columns: {required_columns}"}
+        
+        # Convert to list of dictionaries
+        goldens = df.to_dict('records')
+        
+        # For now, store in a global variable (later use a database)
+        global GOLDEN_EXAMPLES
+        GOLDEN_EXAMPLES = goldens
+        
+        return {
+            "success": True,
+            "message": f"Uploaded {len(goldens)} golden examples",
+            "examples": len(goldens),
+            "sample": goldens[0] if goldens else None
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-# Test metrics endpoint
+# Get golden examples
+@app.get("/api/get-goldens")
+async def get_goldens():
+    return {
+        "total": len(GOLDEN_EXAMPLES),
+        "goldens": GOLDEN_EXAMPLES
+    }
+
+# Metrics endpoint
 @app.get("/api/metrics")
 async def get_metrics():
     return {
@@ -173,7 +210,8 @@ async def health_check():
             "status": "healthy",
             "pinecone_connected": True,
             "vectors_count": stats.total_vector_count,
-            "gemini_ready": True
+            "gemini_ready": True,
+            "golden_examples_loaded": len(GOLDEN_EXAMPLES)
         }
     except Exception as e:
         return {"status": "unhealthy", "pinecone_connected": False, "error": str(e)}
