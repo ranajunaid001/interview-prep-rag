@@ -34,8 +34,7 @@ index = pc.Index(index_name)
 # Database connection
 def get_db():
     conn = psycopg2.connect(
-        os.environ.get("DATABASE_URL"),
-        sslmode='require'  # Add this for Railway
+        "postgresql://postgres:GouIluYqMNTzZRaOTIWYmeblIuqAXLsh@interchange.proxy.rlwy.net:43799/railway"
     )
     return conn
 
