@@ -274,7 +274,7 @@ Respond ONLY with this JSON format:
 {{
     "accuracy": "correct" or "incorrect",
     "tone": "empathetic" or "not_empathetic",
-    "explanation": "Brief explanation of your evaluation"
+    "explanation": "One short sentence why (max 15 words)"
 }}"""
             
             # Get evaluation from Gemini
