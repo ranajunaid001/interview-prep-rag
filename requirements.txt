@@ -1,8 +1,8 @@
 fastapi
 uvicorn
-anthropic
+google-generativeai
 openai
-pinecone-client
+pinecone
 pandas
 openpyxl
 python-multipart
