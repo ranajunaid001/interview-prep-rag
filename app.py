@@ -72,7 +72,7 @@ async def chat(msg: ChatMessage):
             vector=query_embedding,
             top_k=3,
             include_metadata=True,
-            filter={"type": "document"}  # Only search documents, not goldens
+
         )
         
         # Extract context from results
