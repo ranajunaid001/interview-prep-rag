@@ -33,7 +33,10 @@ index = pc.Index(index_name)
 
 # Database connection
 def get_db():
-    conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
+    conn = psycopg2.connect(
+        os.environ.get("DATABASE_URL"),
+        sslmode='require'  # Add this for Railway
+    )
     return conn
 
 # Model for chat messages
