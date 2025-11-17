@@ -5,14 +5,17 @@ import json
 import os
 from pinecone import Pinecone
 from openai import OpenAI
-import anthropic
+import google.generativeai as genai
 
 app = FastAPI()
 
 # Initialize clients
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+# Configure Gemini
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+gemini_model = genai.GenerativeModel('gemini-pro')
 
 # Get or create Pinecone index
 index_name = os.environ.get("PINECONE_INDEX_NAME", "interview-prep")
@@ -62,7 +65,7 @@ async def get_metrics():
         }
     }
 
-# Health check for Pinecone
+# Health check for connections
 @app.get("/api/health")
 async def health_check():
     try:
@@ -70,7 +73,8 @@ async def health_check():
         return {
             "status": "healthy",
             "pinecone_connected": True,
-            "vectors_count": stats.total_vector_count
+            "vectors_count": stats.total_vector_count,
+            "gemini_ready": True
         }
     except:
         return {"status": "unhealthy", "pinecone_connected": False}
@@ -79,15 +83,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-```
-
-**Also update your `requirements.txt`:**
-```
-fastapi
-uvicorn
-anthropic
-openai
-pinecone-client
-pandas
-openpyxl
-python-multipart
